@@ -1,0 +1,10 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stack build-out for ECS an cluster
+Resources:
+  InfrastructureStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://s3.amazonaws.com/ecs-service-catalog/sc-templates/Templates/ecs-cluster.yml
+Outputs:
+  InfrastructureStack:
+    Value: !GetAtt [InfrastructureStack,Outputs.]

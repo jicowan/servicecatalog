@@ -1,0 +1,947 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Product Delivery Pipeline",
+    "Parameters": {
+        "StackName": {
+            "Type": "String",
+            "Description": "The name of the parent Fargate networking stack that you created. Necessary to locate and reference resources created by that stack."
+        },
+        "TeamName": {
+            "Type": "String",
+            "Description": "The name of your team."
+        },
+        "ServiceName": {
+            "Type": "String",
+            "Default": "nginx",
+            "Description": "A name for the service"
+        },
+        "ContainerPort": {
+            "Type": "Number",
+            "Default": 8080,
+            "Description": "What port number the application inside the docker container is binding to"
+        },
+        "ContainerCpu": {
+            "Type": "Number",
+            "Default": 256,
+            "Description": "How much CPU to give the container. 1024 is 1 CPU"
+        },
+        "ContainerMemory": {
+            "Type": "Number",
+            "Default": 512,
+            "Description": "How much memory in megabytes to give the container"
+        },
+        "Path": {
+            "Type": "String",
+            "Default": "*",
+            "Description": "A path on the public load balancer that this service should be connected to. Use * to send all load balancer traffic to this service."
+        },
+        "HealthCheckPath": {
+            "Type": "String",
+            "Default": "/",
+            "Description": "A path used to verify the health of the service."
+        },
+        "Priority": {
+            "Type": "Number",
+            "Default": 1,
+            "Description": "The priority for the routing rule added to the load balancer. This only applies if your have multiple services which have been assigned to different paths on the load balancer."
+        },
+        "DesiredCount": {
+            "Type": "Number",
+            "Default": 0,
+            "Description": "How many copies of the service task to run"
+        },
+        "Role": {
+            "Type": "String",
+            "Default": "",
+            "Description": "(Optional) The Arn of an IAM role to give the service's containers if the code within needs to access other AWS resources like S3 buckets, DynamoDB tables, etc"
+        }
+    },
+    "Conditions": {
+        "HasCustomRole": {
+            "Fn::Not": [
+                {
+                    "Fn::Equals": [
+                        {
+                            "Ref": "Role"
+                        },
+                        ""
+                    ]
+                }
+            ]
+        }
+    },
+    "Metadata": {
+        "AWS::CloudFormation::Interface": {
+            "ParameterGroups": [
+                {
+                    "Label": {
+                        "default": "Stack Configuration"
+                    },
+                    "Parameters": [
+                        "StackName",
+                        "TeamName"
+                    ]
+                },
+                {
+                    "Label": {
+                        "default": "Service Configuration"
+                    },
+                    "Parameters": [
+                        "ServiceName",
+                        "ContainerPort",
+                        "ContainerCpu",
+                        "ContainerMemory",
+                        "DesiredCount",
+                        "Role"
+                    ]
+                },
+                {
+                    "Label": {
+                        "default": "Load Balancer Configuration"
+                    },
+                    "Parameters": [
+                        "Path",
+                        "HealthCheckPath",
+                        "Priority"
+                    ]
+                }
+            ]
+        }
+    },
+    "Resources": {
+        "PipelineS3Bucket": {
+            "Type": "AWS::S3::Bucket",
+            "DeletionPolicy": "Delete",
+            "Properties": {
+                "BucketName": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            {
+                                "Ref": "AWS::AccountId"
+                            },
+                            {
+                                "Ref": "TeamName"
+                            }
+                        ]
+                    ]
+                }
+            }
+        },
+        "ContainerRepository": {
+            "Type": "AWS::ECR::Repository",
+            "Properties": {
+                "RepositoryName": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            {
+                                "Ref": "TeamName"
+                            },
+                            {
+                                "Ref": "ServiceName"
+                            }
+                        ]
+                    ]
+                },
+                "RepositoryPolicyText": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "AllowPushPull",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": [
+                                    {
+                                        "Fn::Join": [
+                                            "",
+                                            [
+                                                "arn:aws:iam::",
+                                                {
+                                                    "Ref": "AWS::AccountId"
+                                                },
+                                                ":root"
+                                            ]
+                                        ]
+                                    }
+                                ]
+                            },
+                            "Action": [
+                                "ecr:*"
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+        "CloudFormationExecutionRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "cfn-${AWS::StackName}"
+                },
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "cloudformation.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Path": "/",
+                "Policies": [
+                    {
+                        "PolicyName": {
+                            "Fn::Sub": "${AWS::StackName}-CloudFormationExecutionPolicy"
+                        },
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Resource": [
+                                        "*"
+                                    ],
+                                    "Action": [
+                                        "ecs:*",
+                                        "ecr:*",
+                                        "cloudwatch:*",
+                                        "logs:*",
+                                        "ec2:*",
+                                        "route53:*",
+                                        "elasticloadbalancing:*",
+                                        "apigateway:*",
+                                        "iam:*",
+                                        "autoscaling:*",
+                                        "application-autoscaling:*",
+                                        "sns:*"
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "CodeBuildServiceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "cb-${AWS::StackName}"
+                },
+                "Path": "/",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "codebuild.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": {
+                            "Fn::Sub": "${AWS::StackName}-CodeBuildPolicy"
+                        },
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Resource": "*",
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "logs:CreateLogGroup",
+                                        "logs:CreateLogStream",
+                                        "logs:PutLogEvents",
+                                        "ecr:GetAuthorizationToken"
+                                    ]
+                                },
+                                {
+                                    "Resource": [
+                                        {
+                                            "Fn::Join": [
+                                                "",
+                                                [
+                                                    "arn:aws:s3:::",
+                                                    {
+                                                        "Ref": "PipelineS3Bucket"
+                                                    },
+                                                    "/*"
+                                                ]
+                                            ]
+                                        }
+                                    ],
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "s3:GetObject",
+                                        "s3:PutObject",
+                                        "s3:GetObjectVersion"
+                                    ]
+                                },
+                                {
+                                    "Resource": {
+                                        "Fn::Join": [
+                                            "",
+                                            [
+                                                "arn:aws:ecr:",
+                                                {
+                                                    "Ref": "AWS::Region"
+                                                },
+                                                ":",
+                                                {
+                                                    "Ref": "AWS::AccountId"
+                                                },
+                                                ":repository/",
+                                                {
+                                                    "Ref": "ContainerRepository"
+                                                }
+                                            ]
+                                        ]
+                                    },
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "ecr:GetDownloadUrlForLayer",
+                                        "ecr:BatchGetImage",
+                                        "ecr:BatchCheckLayerAvailability",
+                                        "ecr:PutImage",
+                                        "ecr:InitiateLayerUpload",
+                                        "ecr:UploadLayerPart",
+                                        "ecr:CompleteLayerUpload"
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "CodePipelineServiceRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": {
+                    "Fn::Sub": "cp-${AWS::StackName}"
+                },
+                "Path": "/",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": [
+                                    "codepipeline.amazonaws.com"
+                                ]
+                            },
+                            "Action": [
+                                "sts:AssumeRole"
+                            ]
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "root",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Resource": [
+                                        {
+                                            "Fn::Join": [
+                                                "",
+                                                [
+                                                    "arn:aws:s3:::",
+                                                    {
+                                                        "Ref": "PipelineS3Bucket"
+                                                    },
+                                                    "/*"
+                                                ]
+                                            ]
+                                        }
+                                    ],
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "s3:PutObject",
+                                        "s3:Get*",
+                                        "s3:List*"
+                                    ]
+                                },
+                                {
+                                    "Resource": "*",
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "codebuild:StartBuild",
+                                        "codebuild:BatchGetBuilds",
+                                        "codecommit:List*",
+                                        "codecommit:Get*",
+                                        "codecommit:GitPull",
+                                        "codecommit:UploadArchive",
+                                        "codecommit:CancelUploadArchive",
+                                        "cloudformation:*",
+                                        "ecs:*",
+                                        "iam:PassRole"
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+        "CodeBuildProject": {
+            "Type": "AWS::CodeBuild::Project",
+            "Properties": {
+                "Artifacts": {
+                    "Type": "CODEPIPELINE"
+                },
+                "Source": {
+                    "Type": "CODEPIPELINE",
+                    "BuildSpec": "version: 0.1\nphases:\n  install:\n    commands:\n      - apt-get update && apt-get -y install default-jdk maven\n  pre_build:\n    commands:\n      - printenv\n      - java -version\n      - echo -n \"$CODEBUILD_LOG_PATH\" > /tmp/build_id.out\n      - printf \"%s:%s\" \"$REPOSITORY_URI\" \"$(cat /tmp/build_id.out)\" > /tmp/build_tag.out\n      - printf '{\"tag\":\"%s\"}' \"$(cat /tmp/build_id.out)\" > /tmp/build.json\n      - printf \"$(cat /tmp/build.json)\"\n      - $(aws ecr get-login --region $AWS_DEFAULT_REGION)\n      - mvn package\n  build:\n    commands:\n      - echo Build started on `date`\n      - echo -n \"$CODEBUILD_LOG_PATH\" > /tmp/build_id.out\n      - echo Building the Docker image...\n      - docker build -t $REPOSITORY_URI:$CODEBUILD_LOG_PATH -t $REPOSITORY_URI:latest .\n  post_build:\n    commands:\n      - docker push $REPOSITORY_URI:$CODEBUILD_LOG_PATH\n      - docker push $REPOSITORY_URI:latest\n      - echo Build completed on `date`\n      - printf '[{\"name\":\"%s\", \"imageUri\":\"%s\"}]' $CONTAINER_NAME $REPOSITORY_URI:$CODEBUILD_LOG_PATH > /tmp/imagedefinitions.json\nartifacts:\n  files:\n    - /tmp/build.json\n    - /tmp/imagedefinitions.json\n  discard-paths: yes\n"
+                },
+                "Environment": {
+                    "ComputeType": "BUILD_GENERAL1_SMALL",
+                    "Image": "aws/codebuild/docker:1.12.1",
+                    "Type": "LINUX_CONTAINER",
+                    "EnvironmentVariables": [
+                        {
+                            "Name": "AWS_DEFAULT_REGION",
+                            "Value": {
+                                "Ref": "AWS::Region"
+                            }
+                        },
+                        {
+                            "Name": "REPOSITORY_URI",
+                            "Value": {
+                                "Fn::Sub": "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${TeamName}-${ServiceName}"
+                            }
+                        },
+                        {
+                            "Name": "PipelineS3Bucket",
+                            "Value": {
+                                "Ref": "PipelineS3Bucket"
+                            }
+                        },
+                        {
+                            "Name": "CONTAINER_NAME",
+                            "Value": {
+                                "Fn::Join": [
+                                    "-",
+                                    [
+                                        {
+                                            "Ref": "TeamName"
+                                        },
+                                        {
+                                            "Ref": "ServiceName"
+                                        }
+                                    ]
+                                ]
+                            }
+                        }
+                    ]
+                },
+                "Name": {
+                    "Ref": "AWS::StackName"
+                },
+                "ServiceRole": {
+                    "Ref": "CodeBuildServiceRole"
+                }
+            }
+        },
+        "Pipeline": {
+            "Type": "AWS::CodePipeline::Pipeline",
+            "Properties": {
+                "Name": {
+                    "Fn::Sub": "${TeamName}-${ServiceName}-pipeline"
+                },
+                "RoleArn": {
+                    "Fn::GetAtt": [
+                        "CodePipelineServiceRole",
+                        "Arn"
+                    ]
+                },
+                "ArtifactStore": {
+                    "Type": "S3",
+                    "Location": {
+                        "Ref": "PipelineS3Bucket"
+                    }
+                },
+                "Stages": [
+                    {
+                        "Name": "Source",
+                        "Actions": [
+                            {
+                                "Name": "App",
+                                "ActionTypeId": {
+                                    "Category": "Source",
+                                    "Owner": "AWS",
+                                    "Version": 1,
+                                    "Provider": "CodeCommit"
+                                },
+                                "Configuration": {
+                                    "RepositoryName": {
+                                        "Fn::ImportValue": {
+                                            "Fn::Join": [
+                                                ":",
+                                                [
+                                                    {
+                                                        "Ref": "StackName"
+                                                    },
+                                                    "CCName"
+                                                ]
+                                            ]
+                                        }
+                                    },
+                                    "BranchName": "master"
+                                },
+                                "OutputArtifacts": [
+                                    {
+                                        "Name": "App"
+                                    }
+                                ],
+                                "RunOrder": 1
+                            }
+                        ]
+                    },
+                    {
+                        "Name": "Build",
+                        "Actions": [
+                            {
+                                "Name": "Build",
+                                "ActionTypeId": {
+                                    "Category": "Build",
+                                    "Owner": "AWS",
+                                    "Version": 1,
+                                    "Provider": "CodeBuild"
+                                },
+                                "Configuration": {
+                                    "ProjectName": {
+                                        "Ref": "CodeBuildProject"
+                                    }
+                                },
+                                "InputArtifacts": [
+                                    {
+                                        "Name": "App"
+                                    }
+                                ],
+                                "OutputArtifacts": [
+                                    {
+                                        "Name": "BuildOutput"
+                                    }
+                                ],
+                                "RunOrder": 1
+                            }
+                        ]
+                    },
+                    {
+                        "Name": "Deploy",
+                        "Actions": [
+                            {
+                                "Name": "Deploy",
+                                "ActionTypeId": {
+                                    "Category": "Deploy",
+                                    "Owner": "AWS",
+                                    "Version": 1,
+                                    "Provider": "ECS"
+                                },
+                                "Configuration": {
+                                    "ClusterName": {
+                                        "Fn::ImportValue": {
+                                            "Fn::Join": [
+                                                ":",
+                                                [
+                                                    {
+                                                        "Ref": "StackName"
+                                                    },
+                                                    "ClusterName"
+                                                ]
+                                            ]
+                                        }
+                                    },
+                                    "ServiceName": {
+                                        "Fn::Join": [
+                                            "-",
+                                            [
+                                                {
+                                                    "Ref": "ServiceName"
+                                                },
+                                                "svc"
+                                            ]
+                                        ]
+                                    },
+                                    "FileName": "imagedefinitions.json"
+                                },
+                                "InputArtifacts": [
+                                    {
+                                        "Name": "BuildOutput"
+                                    }
+                                ],
+                                "RunOrder": 1
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "TaskDefinition": {
+            "Type": "AWS::ECS::TaskDefinition",
+            "Properties": {
+                "Family": {
+                    "Ref": "ServiceName"
+                },
+                "Cpu": {
+                    "Ref": "ContainerCpu"
+                },
+                "Memory": {
+                    "Ref": "ContainerMemory"
+                },
+                "NetworkMode": "awsvpc",
+                "RequiresCompatibilities": [
+                    "FARGATE"
+                ],
+                "ExecutionRoleArn": {
+                    "Fn::ImportValue": {
+                        "Fn::Join": [
+                            ":",
+                            [
+                                {
+                                    "Ref": "StackName"
+                                },
+                                "ECSTaskExecutionRole"
+                            ]
+                        ]
+                    }
+                },
+                "TaskRoleArn": {
+                    "Fn::If": [
+                        "HasCustomRole",
+                        {
+                            "Ref": "Role"
+                        },
+                        {
+                            "Fn::ImportValue": {
+                                "Fn::Join": [
+                                    ":",
+                                    [
+                                        {
+                                            "Ref": "StackName"
+                                        },
+                                        "ECSTaskExecutionRole"
+                                    ]
+                                ]
+                            }
+                        }
+                    ]
+                },
+                "ContainerDefinitions": [
+                    {
+                        "Name": {
+                            "Fn::Join": [
+                                "-",
+                                [
+                                    {
+                                        "Ref": "TeamName"
+                                    },
+                                    {
+                                        "Ref": "ServiceName"
+                                    }
+                                ]
+                            ]
+                        },
+                        "Cpu": {
+                            "Ref": "ContainerCpu"
+                        },
+                        "Memory": {
+                            "Ref": "ContainerMemory"
+                        },
+                        "Image": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "AWS::AccountId"
+                                    },
+                                    ".dkr.ecr.",
+                                    {
+                                        "Ref": "AWS::Region"
+                                    },
+                                    ".amazonaws.com/",
+                                    {
+                                        "Ref": "TeamName"
+                                    },
+                                    "-",
+                                    {
+                                        "Ref": "ServiceName"
+                                    },
+                                    ":latest"
+                                ]
+                            ]
+                        },
+                        "PortMappings": [
+                            {
+                                "ContainerPort": {
+                                    "Ref": "ContainerPort"
+                                }
+                            }
+                        ],
+                        "LogConfiguration": {
+                            "LogDriver": "awslogs",
+                            "Options": {
+                                "awslogs-group": {
+                                    "Ref": "LogGroup"
+                                },
+                                "awslogs-region": {
+                                    "Ref": "AWS::Region"
+                                },
+                                "awslogs-stream-prefix": "fargate"
+                            }
+                        }
+                    }
+                ]
+            }
+        },
+        "LogGroup": {
+            "Type": "AWS::Logs::LogGroup",
+            "Properties": {
+                "LogGroupName": {
+                    "Fn::Join": [
+                        "/",
+                        [
+                            "/fargate",
+                            "service",
+                            {
+                                "Ref": "ServiceName"
+                            }
+                        ]
+                    ]
+                },
+                "RetentionInDays": 14
+            }
+        },
+        "Service": {
+            "Type": "AWS::ECS::Service",
+            "DependsOn": "LoadBalancerRule",
+            "Properties": {
+                "ServiceName": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            {
+                                "Ref": "ServiceName"
+                            },
+                            "svc"
+                        ]
+                    ]
+                },
+                "Cluster": {
+                    "Fn::ImportValue": {
+                        "Fn::Join": [
+                            ":",
+                            [
+                                {
+                                    "Ref": "StackName"
+                                },
+                                "ClusterName"
+                            ]
+                        ]
+                    }
+                },
+                "LaunchType": "FARGATE",
+                "DeploymentConfiguration": {
+                    "MaximumPercent": 100,
+                    "MinimumHealthyPercent": 0
+                },
+                "DesiredCount": {
+                    "Ref": "DesiredCount"
+                },
+                "NetworkConfiguration": {
+                    "AwsvpcConfiguration": {
+                        "AssignPublicIp": "ENABLED",
+                        "SecurityGroups": [
+                            {
+                                "Fn::ImportValue": {
+                                    "Fn::Join": [
+                                        ":",
+                                        [
+                                            {
+                                                "Ref": "StackName"
+                                            },
+                                            "FargateContainerSecurityGroup"
+                                        ]
+                                    ]
+                                }
+                            }
+                        ],
+                        "Subnets": [
+                            {
+                                "Fn::ImportValue": {
+                                    "Fn::Join": [
+                                        ":",
+                                        [
+                                            {
+                                                "Ref": "StackName"
+                                            },
+                                            "PublicSubnetOne"
+                                        ]
+                                    ]
+                                }
+                            },
+                            {
+                                "Fn::ImportValue": {
+                                    "Fn::Join": [
+                                        ":",
+                                        [
+                                            {
+                                                "Ref": "StackName"
+                                            },
+                                            "PublicSubnetTwo"
+                                        ]
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                },
+                "TaskDefinition": {
+                    "Ref": "TaskDefinition"
+                },
+                "LoadBalancers": [
+                    {
+                        "ContainerName": {
+                            "Fn::Join": [
+                                "-",
+                                [
+                                    {
+                                        "Ref": "TeamName"
+                                    },
+                                    {
+                                        "Ref": "ServiceName"
+                                    }
+                                ]
+                            ]
+                        },
+                        "ContainerPort": {
+                            "Ref": "ContainerPort"
+                        },
+                        "TargetGroupArn": {
+                            "Ref": "TargetGroup"
+                        }
+                    }
+                ]
+            }
+        },
+        "TargetGroup": {
+            "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+            "Properties": {
+                "HealthCheckIntervalSeconds": 6,
+                "HealthCheckPath": {
+                    "Ref": "HealthCheckPath"
+                },
+                "HealthCheckProtocol": "HTTP",
+                "HealthCheckTimeoutSeconds": 5,
+                "HealthyThresholdCount": 10,
+                "TargetType": "ip",
+                "Name": {
+                    "Fn::Join": [
+                        "-",
+                        [
+                            {
+                                "Ref": "ServiceName"
+                            },
+                            "TG"
+                        ]
+                    ]
+                },
+                "Port": {
+                    "Ref": "ContainerPort"
+                },
+                "Protocol": "HTTP",
+                "UnhealthyThresholdCount": 10,
+                "VpcId": {
+                    "Fn::ImportValue": {
+                        "Fn::Join": [
+                            ":",
+                            [
+                                {
+                                    "Ref": "StackName"
+                                },
+                                "VPCId"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "LoadBalancerRule": {
+            "Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+            "Properties": {
+                "Actions": [
+                    {
+                        "TargetGroupArn": {
+                            "Ref": "TargetGroup"
+                        },
+                        "Type": "forward"
+                    }
+                ],
+                "Conditions": [
+                    {
+                        "Field": "path-pattern",
+                        "Values": [
+                            {
+                                "Ref": "Path"
+                            }
+                        ]
+                    }
+                ],
+                "ListenerArn": {
+                    "Fn::ImportValue": {
+                        "Fn::Join": [
+                            ":",
+                            [
+                                {
+                                    "Ref": "StackName"
+                                },
+                                "PublicListener"
+                            ]
+                        ]
+                    }
+                },
+                "Priority": {
+                    "Ref": "Priority"
+                }
+            }
+        }
+    },
+    "Outputs": {
+        "PipelineUrl": {
+            "Value": {
+                "Fn::Sub": "https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}"
+            }
+        },
+        "ContainerRepository": {
+            "Value": {
+                "Ref": "ContainerRepository"
+            }
+        },
+        "PipelineS3Bucket": {
+            "Value": {
+                "Ref": "PipelineS3Bucket"
+            }
+        }
+    }
+}

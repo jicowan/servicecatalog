@@ -1,0 +1,646 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stack build-out for Internal and External ALB
+Parameters:
+  AppEnvironment:
+    Description: ECS CLUSTER ENVIRONMENT
+    Type: String
+    Default: dev
+  ServiceName:
+    Description: Microservice Name
+    Type: String
+    MaxLength: 4
+  CreateExternalLoadBalancer:
+    Description: CreateExternalLoadBalancer
+    Type: String
+    Default: False
+  TeamName:
+    Description: TeamName
+    Type: String
+    MaxLength: 5
+  ECSCluster:
+    Description: ECSCluster
+    Type: String
+  ClusterName:
+    Description: ClusterName
+    Type: String
+  Repository:
+    Description: ECR Repository
+    Type: String
+  ImageTag:
+    Description: ECR ImageTag
+    Type: String
+  Memory:
+    Description: Memory
+    Type: String
+    AllowedValues:
+    - 2048
+    - 3072
+    - 4096
+  CPU:
+    Description: CPU
+    Type: String
+    AllowedValues:
+    - 512
+    - 1024
+  HealthCheckPath:
+    Description: HealthCheckPath
+    Type: String
+  ContainerPort:
+    Description: ContainerPort
+    Type: Number
+Mappings:
+  VpcMap:
+    dev:
+      InternalGeneral:
+      - subnet-dfe22c83
+      - subnet-17a27670
+      ExternalGeneral:
+      - subnet-585d883f
+      - subnet-d961ae85
+      ExternalHostedZone: Z80RG7EJP1ANY
+      InternalHostedZone: ZXMHGOOEGUDYT
+      HostedZoneName: ci-demo.internal
+      VPCCIDR: 10.0.0.0/16
+      Vpc: vpc-328f8249
+Conditions:
+  CreateExternalLoadBalancer: !Equals [!Ref 'CreateExternalLoadBalancer', 'True']
+Resources:
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+  ExternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+      - Key: access_logs.s3.enabled
+        Value: 'false'
+      Name: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,ext]]
+      Scheme: internet-facing
+      SecurityGroups: [!Ref 'ExternalLoadBalancerSG']
+      Subnets: !FindInMap [VpcMap, !Ref AppEnvironment, ExternalGeneral]
+      Tags:
+      - Key: Name
+        Value: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,ext]]
+      - Key: Service
+        Value: !Join ['-',[!Ref AppEnvironment,!Ref ServiceName,ext]]
+  InternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+      - Key: access_logs.s3.enabled
+        Value: 'false'
+      Name: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,int]]
+      Scheme: internal
+      SecurityGroups: [!Ref 'InternalLoadBalancerSG']
+      Subnets: !FindInMap [VpcMap, !Ref AppEnvironment, InternalGeneral]
+      Tags:
+      - Key: Name
+        Value: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,int]]
+      - Key: Service
+        Value: !Join ['-',[!Ref AppEnvironment,!Ref ServiceName,int]]
+  DefaultInternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 10
+      HealthCheckPath: /
+      Name: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName, int]]
+      TargetType: ip
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 10
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+  DefaultExternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 10
+      HealthCheckPath: /
+      Name: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,ext]]
+      TargetType: ip
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 10
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+  ListenerExternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      DefaultActions:
+      - TargetGroupArn: !Ref 'DefaultExternalTargetGroup'
+        Type: forward
+      LoadBalancerArn: !Ref 'ExternalLoadBalancer'
+      Port: 443
+      Protocol: HTTPS
+      #Certificates:
+      #- CertificateArn: !FindInMap [VpcMap, !Ref 'AppEnvironment', CertificateARN]
+  ListenerInternalLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - TargetGroupArn: !Ref 'DefaultInternalTargetGroup'
+        Type: forward
+      LoadBalancerArn: !Ref 'InternalLoadBalancer'
+      Port: 80
+      Protocol: HTTP
+  FargateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+      GroupDescription: Inbound from VPC
+      SecurityGroupIngress:
+      - IpProtocol: -1
+        CidrIp: !FindInMap [VpcMap, !Ref AppEnvironment, VPCCIDR]
+  InternalLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Join ['', ['Opens port 80 on ', !FindInMap [VpcMap, !Ref AppEnvironment, VPCCIDR]]]
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: !FindInMap [VpcMap, !Ref AppEnvironment, VPCCIDR]
+      Tags:
+      - Key: ServiceName
+        Value: !Ref 'ServiceName'
+      - Key: AppEnvironment
+        Value: !Ref 'AppEnvironment'
+      - Key: ClusterName
+        Value: !Ref 'ECSCluster'
+      - Key: Name
+        Value: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,InternalLB]]
+  ExternalLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      GroupDescription: Opens 443 for public traffic
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp: 0.0.0.0/0
+      Tags:
+      - Key: ServiceName
+        Value: !Ref 'ServiceName'
+      - Key: AppEnvironment
+        Value: !Ref 'AppEnvironment'
+      - Key: ClusterName
+        Value: !Ref 'ECSCluster'
+      - Key: Name
+        Value: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName,ExternalLB]]
+  ExtELBToApplicationEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: CreateExternalLoadBalancer
+    Metadata:
+      Comment: This links ELB and Application instances
+    Properties:
+      GroupId: !Ref 'ExternalLoadBalancerSG'
+      IpProtocol: '-1'
+      DestinationSecurityGroupId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,sg]]
+  ApplicationFromExtELBIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: CreateExternalLoadBalancer
+    Metadata:
+      Comment: This links ELB and Application instances
+    Properties:
+      GroupId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,sg]]
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref 'ExternalLoadBalancerSG'
+
+  IntELBToApplicationEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Metadata:
+      Comment: This links ELB and Application instances
+    Properties:
+      GroupId: !Ref 'InternalLoadBalancerSG'
+      IpProtocol: '-1'
+      DestinationSecurityGroupId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,sg]]
+
+  ApplicationFromIntELBIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Metadata:
+      Comment: This links ELB and Application instances
+    Properties:
+      GroupId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,sg]]
+      IpProtocol: '-1'
+      SourceSecurityGroupId: !Ref 'InternalLoadBalancerSG'
+
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com, application-autoscaling.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: !Join ['-',[!Ref 'AWS::StackName',!Ref AppEnvironment,!Ref ServiceName,ECSServiceRole]]
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['ecs:*', 'cloudwatch:Describe*', 'cloudwatch:Create*', 'cloudwatch:Put*',
+              'cloudwatch:List*', 'cloudwatch:Get*', 'logs:PutLogEvents', 'logs:DescribeLogStreams',
+              'application-autoscaling:Describe*', 'application-autoscaling:PutScalingPolicy',
+              'application-autoscaling:DeleteScalingPolicy', 'application-autoscaling:RegisterScalableTarget',
+              'ec2:AuthorizeSecurityGroupIngress', 'ec2:Describe*', 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer',
+              'elasticloadbalancing:DeregisterTargets', 'elasticloadbalancing:Describe*',
+              'elasticloadbalancing:RegisterInstancesWithLoadBalancer', 'elasticloadbalancing:RegisterTargets']
+            Resource: '*'
+
+  #Start of TargetGroup
+  InternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      HealthCheckPath: !Ref 'HealthCheckPath'
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: '5'
+      UnhealthyThresholdCount: 10
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+      Tags:
+      - Key: Image
+        Value: !Sub ${Repository}:${ImageTag}
+  InternalListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - TargetGroupArn: !Ref 'InternalTargetGroup'
+        Type: forward
+      Conditions:
+      - Field: path-pattern
+        Values: ['*']
+      ListenerArn: !Ref 'ListenerInternalLoadBalancer'
+      Priority: 1
+  InternalService:
+    Type: AWS::ECS::Service
+    DependsOn: InternalListenerRule
+    Properties:
+      Cluster: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,cluster]]
+      DesiredCount: '1'
+      LaunchType: FARGATE
+      LoadBalancers:
+      - ContainerName: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName]]
+        ContainerPort: !Ref 'ContainerPort'
+        TargetGroupArn: !Ref 'InternalTargetGroup'
+      TaskDefinition: !Ref 'TaskDefinition'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref FargateSG
+          Subnets: !FindInMap [VpcMap, !Ref AppEnvironment, InternalGeneral]
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: !Sub ${AWS::StackName}-TaskRole
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: ['s3:ListBucket']
+            Resource: ['arn:aws:s3:::*']
+          - Effect: Allow
+            Action: ['s3:GetObject']
+            Resource: ['arn:aws:s3:::*/*']
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref 'CPU'
+      Memory: !Ref 'Memory'
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      ContainerDefinitions:
+      - Name: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName]]
+        Essential: 'true'
+        Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${Repository}:${ImageTag}
+        Memory: !Ref 'Memory'
+        PortMappings:
+        - ContainerPort: !Ref 'ContainerPort'
+        Environment:
+        - Name: env
+          Value: !Ref 'AppEnvironment'
+        - Name: name
+          Value: !Ref 'ServiceName'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref LogGroup
+            awslogs-region: !Ref "AWS::Region"
+            awslogs-stream-prefix: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName]]
+      Volumes:
+      - Name: my-vol
+  LogGroup:
+    Type : AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName]]
+      RetentionInDays: 14
+
+  ExternalTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      HealthCheckPath: !Ref 'HealthCheckPath'
+      Port: 443
+      Protocol: HTTP
+      TargetType: ip
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: '5'
+      UnhealthyThresholdCount: 10
+      VpcId: !FindInMap [VpcMap, !Ref AppEnvironment, Vpc]
+      Tags:
+      - Key: Image
+        Value: !Sub ${Repository}:${ImageTag}
+  ExternalListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      Actions:
+      - TargetGroupArn: !Ref 'ExternalTargetGroup'
+        Type: forward
+      Conditions:
+      - Field: path-pattern
+        Values: [!Ref 'RouteRegexExternal']
+      ListenerArn: !Ref 'ListenerExternalLoadBalancer'
+      Priority: 1
+  ExternalService:
+    Type: AWS::ECS::Service
+    Condition: CreateExternalLoadBalancer
+    DependsOn: ExternalListenerRule
+    Properties:
+      Cluster: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,cluster]]
+      DesiredCount: '1'
+      LaunchType: FARGATE
+      LoadBalancers:
+      - ContainerName: !Join ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ServiceName]]
+        ContainerPort: !Ref 'ContainerPort'
+        TargetGroupArn: !Ref 'ExternalTargetGroup'
+      TaskDefinition: !Ref 'TaskDefinition'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref FargateSG
+          Subnets: !FindInMap [VpcMap, !Ref AppEnvironment, ExternalGeneral]
+  AutoScalingIntService:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 1
+      ResourceId: !Join ['/', [service, !Ref 'ECSCluster',!GetAtt [InternalService, Name]]]
+      RoleARN: !GetAtt [ECSServiceRole,Arn]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  AutoScalingExtService:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 1
+      ResourceId: !Join ['/', [service, !Ref 'ECSCluster',!GetAtt [ExternalService, Name]]]
+      RoleARN: !GetAtt [ECSServiceRole,Arn]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+  ScalingUpPolicyInService:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-${ServiceName}-ScalingUpPolicyInternal
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'AutoScalingIntService'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        StepAdjustments:
+        - ScalingAdjustment: 1
+          MetricIntervalLowerBound: 0
+  ScalingUpPolicyExtService:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-${ServiceName}-ScalingUpPolicyExternal
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'AutoScalingExtService'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        StepAdjustments:
+        - ScalingAdjustment: 1
+          MetricIntervalLowerBound: 0
+  ScalingDownPolicyInService:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-${ServiceName}-ScalingDownPolicyInternal
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'AutoScalingIntService'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        StepAdjustments:
+        - ScalingAdjustment: -1
+          MetricIntervalUpperBound: -20
+        - ScalingAdjustment: -1
+          MetricIntervalLowerBound: -20
+          MetricIntervalUpperBound: -10
+  ScalingDownPolicyExtService:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-${ServiceName}-ScalingDownPolicyExternal
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref 'AutoScalingExtService'
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 60
+        StepAdjustments:
+        - ScalingAdjustment: -1
+          MetricIntervalUpperBound: -20
+        - ScalingAdjustment: -1
+          MetricIntervalLowerBound: -20
+          MetricIntervalUpperBound: -10
+  HighCPUIntServiceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPUUtilization exceeding threshold . Triggers scale up
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref 'ECSCluster'
+      - Name: ServiceName
+        Value: !GetAtt [InternalService, Name]
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '2'
+      Threshold: '80'
+      AlarmActions: [!Ref 'ScalingUpPolicyInService']
+      ComparisonOperator: GreaterThanThreshold
+  HighCPUExtServiceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      AlarmDescription: CPUUtilization exceeding threshold . Triggers scale up
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref 'ECSCluster'
+      - Name: ServiceName
+        Value: !GetAtt [ExternalService, Name]
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '2'
+      Threshold: '80'
+      AlarmActions: [!Ref 'ScalingUpPolicyExtService']
+      ComparisonOperator: GreaterThanThreshold
+  LowCPUIntServiceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: CPUUtilization lowers threshold . Triggers scale down
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref 'ECSCluster'
+      - Name: ServiceName
+        Value: !GetAtt [InternalService, Name]
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '2'
+      Threshold: '20'
+      AlarmActions: [!Ref 'ScalingDownPolicyInService']
+      ComparisonOperator: LessThanThreshold
+  LowCPUExtServiceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      AlarmDescription: CPUUtilization exceeding threshold . Triggers scale up
+      ActionsEnabled: true
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Unit: Percent
+      Dimensions:
+      - Name: ClusterName
+        Value: !Ref 'ECSCluster'
+      - Name: ServiceName
+        Value: !GetAtt [ExternalService, Name]
+      Statistic: Average
+      Period: '60'
+      EvaluationPeriods: '2'
+      Threshold: '20'
+      AlarmActions: [!Ref 'ScalingDownPolicyExtService']
+      ComparisonOperator: LessThanThreshold
+  APIGWResource:
+    Type: AWS::ApiGateway::Resource
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      ParentId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,apigatewayrootid]]
+      PathPart: !Ref ServiceName
+      RestApiId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,apigatewayid]]
+  APIGWProxy:
+    Type: AWS::ApiGateway::Resource
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      ParentId: !Ref APIGWResource
+      PathPart: "{proxy+}"
+      RestApiId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,apigatewayid]]
+  APIGWMethod:
+    Type: AWS::ApiGateway::Method
+    Condition: CreateExternalLoadBalancer
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: None
+      Integration:
+        Type: HTTP_PROXY
+        Uri: !Join [ "", [ "https://${stageVariables.", !Ref ServiceName, "}/{proxy}" ] ]
+        IntegrationHttpMethod: ANY
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+      RequestParameters:
+        method.request.path.proxy: true
+      ResourceId: !Ref APIGWProxy
+      RestApiId: !ImportValue
+          Fn::Join : ['-',[!Ref TeamName,!Ref AppEnvironment,!Ref ClusterName,apigatewayid]]
+
+
+Outputs:
+  ListenerExternalLoadBalancer:
+    Value: !Ref 'ListenerExternalLoadBalancer'
+    Condition: CreateExternalLoadBalancer
+  ListenerInternalLoadBalancer:
+    Value: !Ref 'ListenerInternalLoadBalancer'
+  InternalLoadBalancer:
+    Value: !Ref 'InternalLoadBalancer'
+  DefaultInternalTargetGroup:
+    Value: !Ref 'DefaultInternalTargetGroup'
+  DefaultExternalTargetGroup:
+    Value: !Ref 'DefaultExternalTargetGroup'
+    Condition: CreateExternalLoadBalancer

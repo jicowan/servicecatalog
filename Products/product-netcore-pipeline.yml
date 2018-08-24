@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Product Delivery Pipeline
+Parameters:
+  ServiceName:
+    Description: >
+      REQUIRED - 4 letter short name of the microservice
+    Type: String
+    MaxLength: 4
+  TeamName:
+    Description: >
+      REQUIRED - 5 letter short name of the team , who is the owner of this microservice
+    Type: String
+    MaxLength: 5
+  ClusterName:
+    Description: >
+      REQUIRED - Name of the microservice cluster. This should match with the name given in the
+      previous product, which created the host level infrastructure
+    Type: String
+  Memory:
+    Description: >
+      REQUIRED - The number of MiB of memory to reserve for the container. If your container attempts to exceed the
+      allocated memory, the container is terminated.
+    Type: String
+  CPU:
+    Description: >
+      REQUIRED - The minimum number of CPU units to reserve for the container. Containers share unallocated CPU units with other
+      containers on the instance by using the same ratio as their allocated CPU units. For more information, see the
+      cpu content for the ContainerDefinition data type in the Amazon EC2 Container Service API Reference.
+    Type: String
+  RouteRegexExternal:
+    Description: RegEx for external endpoints
+    Type: String
+  HealthCheckPath:
+    Description: >
+      REQUIRED - The API endpoing, which the load balancer will hit to evaluate the health of the container. If this
+      fails or the load balancer does not receives the response within 5 minutes, the container will be terminated.
+    Type: String
+  ContainerPort:
+    Description: >
+      REQUIRED - The Port where your application runs inside the container.
+    Type: Number
+  CreateExternalLoadBalancer:
+    Description: >
+      OPTIONAL - Set to True, if a public facing load balancer is desired for the microservice
+    Type: String
+    Default: False
+  DEVECSCluster:
+    Description: >
+      REQUIRED - Name of the DEV ECS cluster, that you received after launching the previous product,
+      which created the host level infrastructure
+    Type: String
+  TESTECSCluster:
+    Description: >
+      REQUIRED - Name of the DEV ECS cluster, that you received after launching the previous product,
+      which created the host level infrastructure
+    Type: String
+  PipelineS3Bucket:
+    Description: >
+      S3 Bucket, which holds the versioned common templates.
+      This bucket also holds the folders required for the code pipeline and codebuild to work.Ideally, you
+      may want to remove this parameter completely and code the name of bucket directly
+    Type: String
+    Default: 256151769638-cft
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy : Delete
+    Properties:
+      BucketName: !Join ['-',[ !Ref "AWS::AccountId",!Ref TeamName,!Ref ServiceName]]
+  ContainerRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Join ['-',[!Ref TeamName,!Ref ServiceName]]
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+        -
+          Sid: AllowPushPull
+          Effect: Allow
+          Principal:
+            AWS:
+              - !Join ["",["arn:aws:iam::",!Ref "AWS::AccountId",":root"]]
+          Action:
+            - "ecr:*"
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Join ['-',[!Ref TeamName,!Ref ServiceName]]
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    #DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub cfn-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - 'cloudformation.amazonaws.com'
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-CloudFormationExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: Allow
+                Resource:
+                  - '*'
+                Action:
+                  - ecs:*
+                  - ecr:*
+                  - cloudwatch:*
+                  - logs:*
+                  - ec2:*
+                  - route53:*
+                  - elasticloadbalancing:*
+                  - apigateway:*
+                  - iam:*
+                  - autoscaling:*
+                  - application-autoscaling:*
+                  - sns:*
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cb-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - 'codebuild.amazonaws.com'
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ecr:GetAuthorizationToken
+              - Resource:
+                  - !Join ['',["arn:aws:s3:::",!Ref S3Bucket,"/*"]]
+                  - !Join ['',["arn:aws:s3:::",!Ref PipelineS3Bucket,"/*"]]
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+              - Resource: !Join ['',["arn:aws:ecr:",!Ref "AWS::Region",":",!Ref "AWS::AccountId",":repository/",!Ref "ContainerRepository"]]
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cp-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - 'codepipeline.amazonaws.com'
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Resource:
+                  - !Join ['',["arn:aws:s3:::",!Ref "S3Bucket","/*"]]
+                  - !Join ['',["arn:aws:s3:::",!Ref "AWS::AccountId","-cft/*"]]
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:Get*
+                  - s3:List*
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - codecommit:List*
+                  - codecommit:Get*
+                  - codecommit:GitPull
+                  - codecommit:UploadArchive
+                  - codecommit:CancelUploadArchive
+                  - cloudformation:*
+                  - iam:PassRole
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.1
+          phases:
+            pre_build:
+              commands:
+                - printenv
+                - echo -n "$CODEBUILD_LOG_PATH" > /tmp/build_id.out
+                - printf "%s:%s" "$REPOSITORY_URI" "$(cat /tmp/build_id.out)" > /tmp/build_tag.out
+                - printf '{"tag":"%s"}' "$(cat /tmp/build_id.out)" > /tmp/build.json
+                - $(aws ecr get-login --region $AWS_DEFAULT_REGION)
+            build:
+              commands:
+                - echo Build started on `date`
+                - echo -n "$CODEBUILD_LOG_PATH" > /tmp/build_id.out
+                - echo Building the Docker image...
+                - docker build -t $REPOSITORY_URI:$CODEBUILD_LOG_PATH .
+            post_build:
+              commands:
+                - docker push $REPOSITORY_URI:$CODEBUILD_LOG_PATH
+                - echo Build completed on `date`
+                - aws s3 cp s3://$PipelineS3Bucket/sc-templates/microservice.yml /tmp/microservice.yml
+          artifacts:
+            files:
+              - /tmp/build.json
+              - /tmp/microservice.yml
+            discard-paths: yes
+      Environment:
+        ComputeType: "BUILD_GENERAL1_SMALL"
+        Image: "aws/codebuild/docker:1.12.1"
+        Type: "LINUX_CONTAINER"
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: REPOSITORY_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${TeamName}-${ServiceName}
+          - Name: PipelineS3Bucket
+            Value: !Ref PipelineS3Bucket
+      Name: !Ref AWS::StackName
+      ServiceRole: !Ref CodeBuildServiceRole
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${TeamName}-${ServiceName}-pipeline'
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3Bucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                RepositoryName: !Ref ContainerRepository
+                BranchName: master
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: App
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        - Name: DeployToDev
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub ${TeamName}-dev-${ServiceName}
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: BuildOutput::microservice.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "ImageTag" : { "Fn::GetParam" : [ "BuildOutput", "build.json", "tag" ] },
+                    "AppEnvironment": "dev",
+                    "ClusterName": "${ClusterName}",
+                    "ContainerPort": "${ContainerPort}",
+                    "CPU": "${CPU}",
+                    "CreateExternalLoadBalancer": "${CreateExternalLoadBalancer}",
+                    "ECSCluster": "${DEVECSCluster}",
+                    "HealthCheckPath": "${HealthCheckPath}",
+                    "Memory": "${Memory}",
+                    "Repository": "${ContainerRepository}",
+                    "RouteRegexExternal": "${RouteRegexExternal}",
+                    "ServiceName":"${ServiceName}",
+                    "TeamName":"${TeamName}"
+                  }
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+        - Name: DeployToTest
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CREATE_UPDATE
+                StackName: !Sub ${TeamName}-test-${ServiceName}
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: BuildOutput::microservice.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "ImageTag" : { "Fn::GetParam" : [ "BuildOutput", "build.json", "tag" ] },
+                    "AppEnvironment": "test",
+                    "ClusterName": "${ClusterName}",
+                    "ContainerPort": "${ContainerPort}",
+                    "CPU": "${CPU}",
+                    "CreateExternalLoadBalancer": "${CreateExternalLoadBalancer}",
+                    "ECSCluster": "${TESTECSCluster}",
+                    "HealthCheckPath": "${HealthCheckPath}",
+                    "Memory": "${Memory}",
+                    "Repository": "${ContainerRepository}",
+                    "RouteRegexExternal": "${RouteRegexExternal}",
+                    "ServiceName":"${ServiceName}",
+                    "TeamName":"${TeamName}"
+                  }
+              InputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 1
+Outputs:
+  PipelineUrl:
+    Value: !Sub https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${Pipeline}
+  ContainerRepository:
+    Value: !Ref ContainerRepository
+  S3Bucket:
+    Value: !Ref S3Bucket
+  CodeCommitRepository:
+    Value: !Ref CodeCommitRepository
